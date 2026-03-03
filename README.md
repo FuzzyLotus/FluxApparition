@@ -1,22 +1,56 @@
-# terrarium-stand
-This repository works as a template for new pedals created for the [terrarium](https://www.pedalpcb.com/product/pcb351/) from [PedalPCB](https://www.pedalpcb.com).
-To create a new pedal, simply create a new git repository using this template and start out with the basic structure in the `your_pedal` directory. Change the name of the directory to whatever you like but make sure you also change `TARGET = your_pedal` in `your_pedal/Makefile`. If you want use the workflow file for GitHub Actions, make sure to also update the `PEDAL_NAME` variable in the workflow file. If you don't want to use GitHub Action you can simply delete the workflow file.
+Flux Apparition
 
-## Getting started
-Build the daisy libraries with:
-```
-make -C DaisySP
-make -C libDaisy
-```
+An experimental C++ reverb firmware for the Daisy Seed on the PedalPCB Terrarium. It escapes standard algorithms by using a degrading external feedback loop with lo-fi decimation, SVF filtering, and ghostly pitch-smearing to create haunting, atmospheric washes.
+Hardware Controls
 
-Then flash your terrarium with:
-```
-cd your_pedal
-# using USB (after entering bootloader mode)
-make program-dfu
-# using JTAG/SWD adaptor (like STLink)
-make program
-```
+Knobs
 
-Note: The template pedal only turns the LED of the terrarium on and off and does no audio processing at all.
-For an example with audio processing generated from this template you can checkout a [reverb](https://github.com/fxwiegand/terrarium-reverb).
+    Mix (Knob 1): Wet/Dry balance.
+
+    Decay (Knob 2): Feedback amount fed into the degrading loop.
+
+    Dwell (Knob 3): Input drive and saturation into the tank. Higher settings slow down the internal modulation rate.
+
+    Tone (Knob 4): SVF lowpass filter cutoff inside the feedback loop.
+
+    Mod (Knob 5): Reverb modulation depth.
+
+    Atmosphere (Knob 6): Mix of the ghostly pitch-shifter (octave up + detune) inside the loop.
+
+Switches
+
+    Mode (SW 1): UP = Vintage routing. DOWN = Haunted (routes wet output back into the Pre-Delay for chaotic swells).
+
+    Pre-Delay (SW 2): UP = Short slapback attack. DOWN = Envelope swell (pseudo-reverse bowing).
+
+    Mod Character (SW 3): UP = Smooth sine modulation. DOWN = Warped (Sample & Hold style broken tape flutter).
+
+    Lo-Fi (SW 4): UP = Clean reflections. DOWN = Aged (engages loop decimation and bitcrushing).
+
+Footswitches
+
+    Bypass (FS 1): DSP bypass. Allows existing reverb trails to decay naturally when disengaged.
+
+    Apparition (FS 2): Momentary infinite freeze. Forces the feedback loop to maximum and slowly sweeps the Tone filter downward, degrading the frozen pad the longer it is held.
+
+Building and Flashing
+
+    Clone the repository and initialize submodules:
+    Bash
+
+    git clone https://github.com/FuzzyLotus/Flux-Apparition.git
+    cd Flux-Apparition
+    git submodule update --init --recursive
+
+    Build the underlying Daisy libraries (only required once):
+    Bash
+
+    cd libDaisy && make
+    cd ../DaisySP && make
+    cd ..
+
+    Compile the firmware and flash it to the Daisy Seed (ensure the Seed is in bootloader mode):
+    Bash
+
+    make
+    make program-dfu
