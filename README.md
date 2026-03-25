@@ -1,115 +1,214 @@
-MoonChild
-A boutique ambient DSP instrument for Electro-Smith Daisy Petal—where motion (chorus), space (reverb), and memory (freeze) behave as one evolving voice.
+# Moonchild
+### Chorus, Reverb & Freeze for the Electrosmith Daisy Seed / PedalPCB Terrarium
 
-Overview
-MoonChild is not a conventional multi-effect chain. It’s a single, composed instrument: a chorus and reverb that breathe together around a freeze system designed to hold rather than constantly destabilize. The result is an ambient platform that stays musical under the hands—lush when you lean in, steady when you stop, and intentional in how it grows over time.
+Moonchild is a hi-fi multi-effect pedal implemented in C++ for the [Daisy Seed](https://electro-smith.com/products/daisy-seed) microcontroller running on the [PedalPCB Terrarium](https://www.pedalpcb.com/product/terrarium/) guitar pedal platform.
 
-MoonChild is a finished, artist-tested build. The core DSP is complete and the master is treated as a locked reference.
+It combines a transparent modulated chorus, a plate/hall reverb with continuous character morphing, and a freeze function that captures your reverb tail as a living, evolving pad you can play over.
 
-Core concept / design philosophy
-MoonChild’s design is built around one rule:
+*by Folklore Electronics*
 
-Freeze is the stable anchor.
-The frozen bed is captured as a musically stable “time anchor.” Motion and space evolve around it rather than repeatedly re-writing it. The pedal remains alive and expressive, but the memory stays intact: no accidental re-capture, no wobble, no pumping—just a stable bed with subtle evolution in the layers that follow.
+---
 
-Features
-Chorus engine — motion / water
-Lush, organic, stable chorus tuned for musical movement rather than obvious modulation.
-Asymmetric voicing for width and depth without “chorus glare.”
-No ticking, and stable behavior across performance dynamics.
-Clean bypass behavior (no bleed when off).
-Reverb engine — space / moon
-Integrated as part of the same instrument as the chorus, not a separate “reverb block.”
-Expressive bloom and ambient expansion that remains playable and controllable.
-Plate ↔ hall character shaping via a dedicated switch, voiced for musical “space” rather than exaggerated special effects.
-Naturally bonded to the chorus so motion and space feel cohesive.
-Freeze system — memory / time anchor
-Stable frozen bed intended to sit under live playing as a reliable foundation.
-No accidental re-capture: freeze behavior is designed to preserve the captured material.
-Graceful shutdown tail when disabling reverb while freeze is active—no abrupt collapse.
-Extended fade-out behavior for musical exits.
-Consistent freeze loudness tuned for performance reliability.
-Freeze evolution (post-freeze)
-Age-based evolution: the post-freeze layer becomes gradually more cloud-like over time.
-Subtle responsiveness to new playing only in the post-freeze layer.
-The core frozen capture remains stable and undisturbed.
-No rhythmic pumping, no pitch wobble, no obvious ducking.
-Chorus-to-freeze send (momentary)
-FS1 hold enables a momentary chorus → freeze send.
-Slightly enhanced for presence, intentionally subtle and musical.
-Designed for performance gestures—not a latched “always feeding” state.
-LED behavior
-Hold states pulse slowly for clear, non-distracting feedback.
-The reverb/freeze LED pulse subtly deepens with freeze age.
-Expressive status indication without becoming a visual effect.
-Control layout (final)
-Knobs
-K1 — Motion: chorus rate / motion speed of the instrument.
-K2 — Mix: wet/dry blend.
-K3 — Bloom: reverb decay / expansion.
-K4 — Flow: modulation depth / movement intensity.
-K5 — Tether: bonding/interaction between motion and space.
-K6 — Aura: tonal contour of the instrument.
-Switches
-SW1 — Halo: chorus enhancement / additional articulation.
-SW2 — Wide: stereo widening / orbiting space feel.
-SW3 — Merge: interaction strength between chorus and reverb character.
-SW4 — Orbit: reverb character (plate ↔ hall style shaping).
-Footswitches
-FS1 — Chorus / Send
-Tap: chorus on/off
-Hold: momentary chorus-to-freeze send (only while held)
-FS2 — Reverb / Freeze
-Tap: reverb on/off
-Hold: freeze toggle
-DSP architecture (high-level)
-MoonChild is implemented in C++ using a libDaisy / DaisySP-style embedded DSP workflow with real-time audio processing on Daisy Petal.
+## Features
 
-At a high level:
+- **Chorus** — three decorrelated delay lines with triangle LFO modulation and slow drift oscillator
+- **Reverb** — four-tap FDN with input diffusion, plate/hall character morphing, and stereo late field
+- **Freeze** — captures the reverb tail into three parallel voices that evolve over time
+- **Tilt EQ** — full-range tone control that shifts spectral balance without killing content
+- **Chorus Enhancement** — shimmer voice chain adds octave-up harmonic layer to the chorus (SW1)
+- **Orbit / Widen** — stereo field expansion with bloom (SW2)
+- **Bond / Interaction** — cross-couples the chorus and reverb engines with feedback (SW3)
+- **Character** — continuous plate-to-hall reverb morphing (SW4)
 
-A custom chorus provides stable motion with a voiced stereo image.
-A custom reverb is tuned as a companion to the chorus, shaping bloom and space as one instrument.
-A freeze subsystem captures and sustains a stable bed with safeguards against accidental re-capture.
-A post-freeze evolution layer adds gradual, age-based diffusion and subtle performance responsiveness while preserving the integrity of the frozen anchor.
-The architectural intent is musical: capture once, hold steady, evolve the surroundings.
+---
 
-Build status (locked master)
-This repository represents a completed, validated master build:
+## Controls
 
-The core DSP is complete.
-The pedal has been artist-tested and the master is locked.
-If you want to experiment (new algorithms, alternate voicings, different freeze behaviors), treat that work as:
+| Control | Label | Function |
+|---|---|---|
+| Knob 1 | FLOW | Chorus LFO rate (0.1 – 3 Hz) |
+| Knob 2 | VEIL | Dry/wet crossfade |
+| Knob 3 | FADE | Reverb decay time |
+| Knob 4 | SWAY | Chorus modulation depth (0.2 – 5 ms) |
+| Knob 5 | BIND | Chorus/reverb balance (left = chorus, right = reverb) |
+| Knob 6 | HAZE | Tilt EQ (left = warm, noon = flat, right = bright) |
+| SW1 | AURA | Chorus enhancement on/off |
+| SW2 | ORBT | Orbit / stereo widening on/off |
+| SW3 | LINK | Bond / chorus-reverb interaction on/off |
+| SW4 | HALL | Reverb character (plate to hall) on/off |
+| FS1 | CHR | Tap: chorus on/off. Hold: momentary chorus-to-freeze send |
+| FS2 | REV | Tap: reverb on/off. Hold: freeze toggle |
 
-a new branch, or
-an explicitly named experimental variant,
-not casual edits to the master.
+### LEDs
 
-Hardware / platform
-Platform: Electro-Smith Daisy Petal (Daisy Seed ecosystem)
-Language: C++
-Domain: real-time embedded audio DSP
-Workflow: Makefile-based build, DaisySP/libDaisy-style development
-Usage / playing notes
-MoonChild rewards intentional playing—both sparse and dense.
+| LED | Off | Solid | Pulsing |
+|---|---|---|---|
+| LED1 | Chorus off | Chorus on | FS1 held (sending to freeze) |
+| LED2 | Reverb off | Reverb on | Freeze active |
 
-Establish the bed: engage reverb, then hold FS2 to freeze. The capture becomes your stable anchor.
-Play over memory: the frozen bed stays stable while the instrument evolves around it—space breathes, motion moves, but the anchor remains.
-Gesture with FS1: with chorus enabled, hold FS1 to momentarily feed chorus into the freeze path. Use it like a brush stroke, not a mode.
-Exit gracefully: if you disable reverb while frozen, MoonChild performs a controlled shutdown tail rather than snapping the world off.
-The goal is confidence: you should be able to build an ambient structure live, then trust it while you perform.
+LED pulse range is 50–100% brightness to avoid flicker.
 
-Repository guidance
-MoonChild.cpp contains the primary firmware source.
-terrarium.h defines the Terrarium hardware mapping used by the firmware.
-The top-level Makefile describes the build configuration for Daisy Petal workflows.
-PreProd/ is intentionally not part of the published build and is ignored by git.
-If you are archiving a performance-validated version, tag releases from main and do experimental work elsewhere.
+---
 
-Optional future directions (as experimental branches)
-MoonChild is complete as-is. Any future ideas—alternate voicings, additional modes, or variant evolution behaviors—belong in clearly named experimental branches to preserve the locked master.
+## Hardware Requirements
 
-License
-See LICENSE (GPL-3.0).
+- [Electrosmith Daisy Seed](https://electro-smith.com/products/daisy-seed)
+- [PedalPCB Terrarium](https://www.pedalpcb.com/product/terrarium/) (or compatible Daisy Seed pedalboard)
+- ARM DFU-capable USB connection for flashing
 
-Closing note
-MoonChild is an instrument built from motion, space, and memory—designed to feel alive, but never unstable.
+---
+
+## Flashing (No Computer Skills Required)
+
+You don't need to install anything or know how to code. Just download the `.bin` file from the [Releases page](https://github.com/FuzzyLotus/Moonchild/releases) and follow these steps:
+
+### Step 1 — Put your Daisy Seed into bootloader mode
+1. Locate the two small buttons on the Daisy Seed: **BOOT** and **RESET**
+2. Hold down **BOOT**
+3. While holding BOOT, tap **RESET**
+4. Release **BOOT**
+5. The Daisy Seed is now ready to receive firmware
+
+### Step 2 — Flash using the web programmer
+1. Go to **[flash.daisy.audio](https://flash.daisy.audio)**
+2. Click the **File Upload** tab
+3. Click **BROWSE...** and select the `moonchild.bin` file you downloaded
+4. Click the **FLASH** button (this may prompt you to select your Daisy Seed from a browser popup)
+5. Wait for it to finish, and your pedal is ready!
+
+> The web programmer works in Chrome or Edge. It will not work in Firefox or Safari.
+
+### 🪟 Windows Users: Web Flasher Not Working?
+If your Windows PC doesn't recognize the Daisy Seed in the browser flasher, you likely need to replace the default USB driver with WinUSB.
+1. Put your Daisy Seed in BOOT mode (Hold **BOOT**, tap **RESET**, release **BOOT**).
+2. Download and run [Zadig](https://zadig.akeo.ie/).
+3. Go to **Options** > **List All Devices**.
+4. Select **DFU in FS Mode** (or **STM32 BOOTLOADER**) from the main dropdown menu.
+5. Ensure the target driver with the green arrow points to **WinUSB**.
+6. Click **Replace Driver**.
+7. Refresh the web flasher page and try connecting again.
+
+---
+
+## How It Works
+
+### Chorus Engine
+
+Three delay lines with offset triangle LFO modulation create a rich ensemble effect. A 12kHz anti-alias filter blended 55/45 with the raw input keeps the chorus transparent. A single gentle saturation stage (linear below 0.8) runs in parallel with the clean signal at 72/28 for dynamics preservation.
+
+### Reverb Engine
+
+Four-tap feedback delay network with four input diffusion allpasses. Delay tap positions crossfade between plate (bright, tight) and hall (dark, wide) based on SW4 state and K3 decay setting. The late reflection field includes stereo cross-feed, halo blending, and slow drift modulation for spatial movement.
+
+### Freeze
+
+Hold FS2 to capture the current reverb tail into three parallel freeze voices with staggered loop lengths (97ms, 149ms, 199ms). The frozen pad evolves over time through texture drift, tonal evolution, and live-play reactivity. Hold FS1 while frozen to blend live chorus into the frozen bed.
+
+Turning off reverb while frozen triggers a graceful shutdown tail that decays naturally instead of cutting abruptly.
+
+### Signal Path
+
+The dry signal is never filtered on the bypass path. An 80Hz HPF only applies to the effect engine inputs. A 120Hz bass recovery filter blends lost low end back into the wet bus. Matched stereo HPFs on the reverb output prevent phase mismatch on mono sum. The tilt EQ replaces a traditional resonant lowpass for full-range usability across the entire knob sweep.
+
+---
+
+## Building from Source
+
+### 1. Clone the DaisyCloudSeed repository and its submodules
+
+```bash
+git clone https://github.com/GuitarML/DaisyCloudSeed
+cd DaisyCloudSeed
+git submodule update --init --recursive
+```
+
+### 2. Build the required libraries
+
+```bash
+make -C libdaisy
+make -C DaisySP
+```
+
+### 3. Clone Moonchild into the petal folder
+
+```bash
+cd petal
+git clone https://github.com/FuzzyLotus/Moonchild
+cd Moonchild
+```
+
+### 4. Build and flash
+
+```bash
+make
+make program-dfu
+```
+
+> Connect your Daisy Seed via USB and put it into DFU mode (hold BOOT, tap RESET, release BOOT) before running `make program-dfu`.
+
+---
+
+## Toolchain
+
+You need the ARM GCC embedded toolchain. On most Linux systems:
+
+```bash
+# Fedora/RHEL
+sudo dnf install arm-none-eabi-gcc arm-none-eabi-newlib
+
+# Ubuntu/Debian
+sudo apt install gcc-arm-none-eabi
+```
+
+Or download directly from [ARM's website](https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads).
+
+---
+
+## Project Structure
+
+```
+Moonchild/
+├── MoonChild.cpp        # Main DSP source
+├── terrarium.h          # Terrarium hardware abstraction (included locally)
+├── Makefile
+└── README.md
+```
+
+`terrarium.h` is included directly in this repo so you don't need to rely on the Terrarium submodule separately.
+
+---
+
+## Switch Wiring Note
+
+SW2 (ORBT) and SW3 (LINK) are physically swapped in software to match the intended panel layout. SW2 reads from `Terrarium::SWITCH_3` and SW3 reads from `Terrarium::SWITCH_2`. If you're wiring your own enclosure, label them according to the panel layout above, not the PCB silkscreen.
+
+---
+
+## Contributing
+
+Pull requests are welcome! If you build on this project, please share your work openly under the same license.
+
+- Fork the repo
+- Create a branch: `git checkout -b my-feature`
+- Commit your changes: `git commit -m "Add my feature"`
+- Push and open a Pull Request
+
+Please test on real hardware before submitting.
+
+---
+
+## License
+
+GNU General Public License v3.0 — see [LICENSE](LICENSE) for details.
+
+You are free to use, modify, and share this project. You may **not** use it in closed-source or commercial products. Any derivatives must also be released under GPL-3.0.
+
+---
+
+## Credits
+
+Built on the [GuitarML DaisyCloudSeed](https://github.com/GuitarML/DaisyCloudSeed) build environment, which bundles [libDaisy](https://github.com/electro-smith/libDaisy) and [DaisySP](https://github.com/electro-smith/DaisySP).
+
+`terrarium.h` is copyright [PedalPCB](http://www.pedalpcb.com), included with original copyright notice intact.
+
+*Moonchild by Folklore Electronics*
