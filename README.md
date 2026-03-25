@@ -208,6 +208,7 @@ You are free to use, modify, and share this project. You may **not** use it in c
 ## Credits
 
 Built on the [GuitarML DaisyCloudSeed](https://github.com/GuitarML/DaisyCloudSeed) build environment, which bundles [libDaisy](https://github.com/electro-smith/libDaisy) and [DaisySP](https://github.com/electro-smith/DaisySP).
+Thanks to Brandon Muir and Jeremy Costa for the name and pedal inspiration - without you, I wouldn't have thought of building such a thing!
 
 `terrarium.h` is copyright [PedalPCB](http://www.pedalpcb.com), included with original copyright notice intact.
 
