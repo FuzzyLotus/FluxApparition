@@ -109,13 +109,6 @@ static inline float fast_tanh(float x)
     return x / (1.f + fabsf(x));
 }
 
-static inline float bbd_saturate(float x)
-{
-    float pos = x / (1.f + fabsf(x));
-    float neg = x / (1.f + 0.8f * fabsf(x));
-    return (x >= 0.f) ? pos : neg;
-}
-
 static inline float tape_warm(float x)
 {
     return x - 0.15f * x * x * x;
@@ -228,26 +221,39 @@ struct Hp1
     void Clear() { y = 0.f; }
 };
 
-struct BbdSvf
+// Tilt EQ: single-knob tone control that shifts spectral balance
+// without killing content. At center (0.5) the output is flat.
+// Below center: warm (low boost, high cut). Above center: bright
+// (high boost, low cut). Based on a 1-pole LP/HP crossfade with
+// a mild gain shelf so the tilt is perceptible but never muddy.
+struct TiltEQ
 {
-    float lo, bp, f, damp;
-    void Init(float freq, float q, float sr)
+    float lpY, hpY, c;
+
+    void Init(float freq, float sr)
     {
-        lo = bp = 0.f;
-        SetFreq(freq, q, sr);
+        lpY = hpY = 0.f;
+        SetFreq(freq, sr);
     }
-    void SetFreq(float freq, float q, float sr)
+
+    void SetFreq(float freq, float sr)
     {
-        freq = std::min(freq, sr * 0.45f);
-        f    = 2.f * sinf(3.14159265f * freq / sr);
-        damp = 1.f / q;
+        c = 1.f - expf(-TWO_PI_F * freq / sr);
     }
-    float Process(float x)
+
+    // tilt: 0.0 = full warm, 0.5 = flat, 1.0 = full bright
+    float Process(float x, float tilt)
     {
-        float hp = x - lo - damp * bp;
-        bp += f * hp;
-        lo += f * bp;
-        return bp * 0.5f + lo * 0.5f;
+        lpY += c * (x - lpY);
+        float hp = x - lpY;
+
+        // At center (0.5): loGain=0.5, hiGain=0.5, sum = x
+        // At 0.0 (warm):   loGain=1.0, hiGain=0.3 — bass up, treble down
+        // At 1.0 (bright): loGain=0.3, hiGain=1.0 — treble up, bass down
+        float loGain = 1.0f - tilt * 0.7f;
+        float hiGain = 0.3f + tilt * 0.7f;
+
+        return lpY * loGain + hp * hiGain;
     }
 };
 
@@ -466,8 +472,8 @@ static DelBuf chDel[3];
 static DelBuf rvDel[4];
 static DelBuf fzCapBuf;
 static Lp1    rvDamp[4];
-static Hp1    rvHpf;
-static BbdSvf toneSvfL, toneSvfR;
+static Hp1    rvHpfL, rvHpfR;
+static TiltEQ toneSvfL, toneSvfR;
 static Hp1    inputHpf;
 static Hp1    chWriteHpf;
 static Lp1    chWriteLpf;
@@ -485,6 +491,10 @@ static Ap     sw1SmoothAp;
 
 static Lp1    revLateSmearL;
 static Lp1    revLateSmearR;
+
+// Low-end recovery: extracts bass from rawDry to blend back
+// into the wet bus, compensating for HPFs on effect inputs.
+static Lp1    wetBassRecover;
 
 static FreezeVoice fzVoice[3];
 static Lp1    fzLp[3];
@@ -530,6 +540,16 @@ static float freezePlayActivity  = 0.f;
 static float freezeAgeSec        = 0.f;
 static float freezeEvoPhase      = 0.f;
 
+// Sub-rate cached sinf values for freeze evolution (updated every 32 samples)
+static float cachedDriftA    = 0.f;
+static float cachedDriftB    = 0.f;
+static float cachedDriftC    = 0.f;
+static float cachedEvoSineA  = 0.f;
+static float cachedEvoSineB  = 0.f;
+// Sub-rate cached sinf values for reverb stereo modulation
+static float cachedSw4Pulse    = 1.f;
+static float cachedDriftStereo = 0.f;
+
 // ============================================================
 // SMOOTHED PARAMETERS
 // ============================================================
@@ -537,7 +557,8 @@ static float tMix   = 0.f,   sMix   = 0.f;
 static float tDecay = 0.f,   sDecay = 0.f;
 static float tDepth = 0.f,   sDepth = 0.f;
 static float tBal   = 0.f,   sBal   = 0.f;
-static float tTone  = 1800.f;
+static float tTone  = 0.5f;
+static float sTone  = 0.5f;
 
 static float tSw1 = 0.f, sSw1 = 0.f;
 static float tSw2 = 0.f, sSw2 = 0.f;
@@ -571,7 +592,23 @@ static Parameter pRate, pMix, pDecay, pDepth, pBal, pTone;
 
 static float ledPulsePhase = 0.f;
 static float ledPulse      = 0.f;
-static float freezeLedAge  = 0.f;
+
+// Decimated sub-rate counter for slow modulation sinfs.
+// These signals (LED pulse, drift, freeze evo) change at < 1 Hz
+// so computing them every 32 samples is inaudible.
+static constexpr int SUBRATE_DIV = 32;
+static int subRateCount = 0;
+
+// Cached shapedDecayNorm — computed once per sample, shared
+// between processReverb() and freeze gain calculation.
+static float cachedDecayNorm = 0.f;
+
+// Hoisted const arrays — were being stack-allocated every sample
+static constexpr int   FZ_JIT_RESET[3]  = {28657, 40111, 56369};
+static constexpr float FZ_JIT_DEPTH[3]  = {4.50f, 6.00f, 8.00f};
+static constexpr int   FZ_CAP_DELAY[3]  = {0, 113, 347};
+static constexpr int   FZ_CAP_DUR[3]    = {89, 157, 271};
+static constexpr int   FZ_CAP_SEQ_END   = 347 + 271 + 64;
 
 // ============================================================
 // DEDICATED FREEZE SHUTDOWN-TAIL STATE
@@ -677,7 +714,7 @@ static inline void processChorus(float input, float modDepth,
     float delC = clampf(delC_ms * SR_OVER_1000, 1.f, (float)(CHORUS_BUF_SIZE - 2));
 
     float filteredWrite = chWriteHpf.Process(chWriteLpf.Process(input));
-    float writeSig = filteredWrite * 0.78f + input * 0.22f;
+    float writeSig = filteredWrite * 0.55f + input * 0.45f;
 
     chDel[0].Write(writeSig);
     chDel[1].Write(writeSig);
@@ -717,13 +754,22 @@ static inline void processChorus(float input, float modDepth,
 static inline void processReverb(float input, float sw2StateAmt,
                                  float &outL, float &outR)
 {
-    float decayNorm = shapedDecayNorm(sDecay);
+    float decayNorm = cachedDecayNorm;
 
-    // Tightened feedback ceiling: 0.34 + 0.50*norm = max 0.84
-    // At typical signal levels this keeps fbInput*fbCoeff < 0.5
-    // more often, where fast_tanh is nearly linear.
-    float fbCoeff = 0.34f + decayNorm * 0.50f;
-    fbCoeff = clampf(fbCoeff, 0.34f, 0.84f);
+    // Feedback ceiling raised to 0.88 for huge room at max K3.
+    // The extended K3 range (0.93) means decayNorm still reaches 1.0,
+    // but the 10-2 o'clock sweet spot maps to lower decayNorm values
+    // so existing tone there is preserved.
+    float fbCoeff = 0.34f + decayNorm * 0.54f;
+    fbCoeff = clampf(fbCoeff, 0.34f, 0.88f);
+
+    // Extended range: sDecay above 0.88 adds extra feedback and size
+    // beyond what decayNorm=1.0 provides. Below 0.88 this is zero,
+    // so the entire sweet spot is completely untouched.
+    float extRange = clampf((sDecay - 0.88f) / (0.93f - 0.88f), 0.f, 1.f);
+    float extSmooth = smoothstep01(extRange);
+    fbCoeff += extSmooth * 0.04f;  // pushes max from 0.88 to 0.92
+    fbCoeff = clampf(fbCoeff, 0.34f, 0.92f);
 
     float tankIn = input;
     tankIn = inDiff[0].Process(tankIn);
@@ -737,7 +783,7 @@ static inline void processReverb(float input, float sw2StateAmt,
     for(int t = 0; t < 4; t++)
     {
         float baseTap = (float)TAP_BRIGHT[t]
-                      + sw4TapAmt * (float)(TAP_DARK[t] - TAP_BRIGHT[t]);
+        + sw4TapAmt * (float)(TAP_DARK[t] - TAP_BRIGHT[t]);
         taps[t] = baseTap;
     }
 
@@ -760,29 +806,35 @@ static inline void processReverb(float input, float sw2StateAmt,
     float plateWeight = 1.f - sSw4;
 
     float bodyGain = 0.22f + decayNorm * 0.15f
-                   + plateWeight * 0.050f
-                   - hallWeight  * 0.035f;
+    + plateWeight * 0.050f
+    - hallWeight  * 0.035f;
 
     float lateGain = 0.078f + decayNorm * 0.230f
-                   - plateWeight * 0.010f
-                   + hallWeight  * 0.225f;
+    - plateWeight * 0.010f
+    + hallWeight  * 0.225f;
 
     bodyGain *= 1.0f + sw2StateAmt * 0.18f;
     lateGain *= 1.0f + sw2StateAmt * 0.28f;
     lateGain *= 1.0f + (decayNorm * sSw4 * 0.08f);
 
+    // At high decay, late reflections bloom to create the huge-room feel.
+    // Only kicks in above the old K3 max (0.88) via extSmooth so the
+    // entire sweet spot below that is completely preserved.
+    float bigRoomBloom = smoothstep01(clampf((decayNorm - 0.7f) / 0.3f, 0.f, 1.f));
+    bigRoomBloom *= 1.0f + extSmooth * 0.8f;
+    lateGain *= 1.0f + bigRoomBloom * 0.35f;
+
     float bodyL = (rd[0] + rd[2]) * bodyGain;
     float bodyR = (rd[1] + rd[3]) * bodyGain;
 
-    float sw4PulsePhase = driftPhase * TWO_PI_F * 0.72f;
-    float sw4Pulse = 1.0f + sSw4 * (0.055f * sinf(sw4PulsePhase));
+    float sw4Pulse = 1.0f + sSw4 * (0.055f * cachedSw4Pulse);
 
-    float driftStereo = sinf(driftPhase * TWO_PI_F * 0.35f) * 0.06f;
+    float driftStereo = cachedDriftStereo;
 
     float lateL = revLateSmearL.Process((rd[1] - rd[2]) * lateGain)
-                * sw4Pulse * (1.0f + driftStereo);
+    * sw4Pulse * (1.0f + driftStereo);
     float lateR = revLateSmearR.Process((rd[0] - rd[3]) * lateGain)
-                * sw4Pulse * (1.0f - driftStereo);
+    * sw4Pulse * (1.0f - driftStereo);
 
     float lateCross = 0.12f + 0.08f * sSw4;
     float lateLxf = lateL + lateR * lateCross;
@@ -800,8 +852,8 @@ static inline void processReverb(float input, float sw2StateAmt,
     float rawL = bodyL * bodyTrim + lateL * lateLift;
     float rawR = bodyR * bodyTrim + lateR * lateLift;
 
-    outL = rvHpf.Process(rawL);
-    outR = rawR - rawL + outL;
+    outL = rvHpfL.Process(rawL);
+    outR = rvHpfR.Process(rawR);
 }
 
 // ============================================================
@@ -829,6 +881,7 @@ static void AudioCallback(AudioHandle::InputBuffer  in,
         fonepole(sSw2,    tSw2,    0.002f);
         fonepole(sSw3,    tSw3,    0.002f);
         fonepole(sSw4,    tSw4,    0.0003f);
+        fonepole(sTone,   tTone,   0.003f);
 
         fonepole(sChOn,    tChOn,    0.002f);
         fonepole(sRvOn,    tRvOn,    0.002f);
@@ -843,13 +896,45 @@ static void AudioCallback(AudioHandle::InputBuffer  in,
 
         float raw = in[0][i];
 
-        ledPulsePhase += 0.35f / SR_F;
-        if(ledPulsePhase >= 1.f)
-            ledPulsePhase -= 1.f;
-        ledPulse = 0.5f + 0.5f * sinf(ledPulsePhase * TWO_PI_F);
+        // Sub-rate computations: LED pulse, drift sinf, and freeze
+        // evolution sinfs are all sub-Hz signals — computing every
+        // 32 samples saves ~7 sinf calls per sample with no audible change.
+        if(++subRateCount >= SUBRATE_DIV)
+        {
+            subRateCount = 0;
 
-        // Hi-Fi: clean dry signal — no tape_warm. Full transient
-        // integrity preserved for touch response.
+            ledPulsePhase += 0.35f * (float)SUBRATE_DIV / SR_F;
+            if(ledPulsePhase >= 1.f)
+                ledPulsePhase -= 1.f;
+            ledPulse = 0.5f + 0.5f * sinf(ledPulsePhase * TWO_PI_F);
+
+            driftVal = sinf(driftPhase * TWO_PI_F);
+            cachedSw4Pulse = sinf(driftPhase * TWO_PI_F * 0.72f);
+            cachedDriftStereo = sinf(driftPhase * TWO_PI_F * 0.35f) * 0.06f;
+
+            // Freeze evo sinfs — only worth computing when frozen
+            if(reverbFz || freezeShutdownTailActive)
+            {
+                float texPhase = freezeTextureDrift * TWO_PI_F;
+                cachedDriftA  = sinf(texPhase);
+                cachedDriftB  = sinf(texPhase * 0.37f + 0.9f);
+                cachedDriftC  = sinf(texPhase * 0.19f + 2.1f);
+
+                float evoPhase = freezeEvoPhase * TWO_PI_F;
+                cachedEvoSineA = sinf(evoPhase);
+                cachedEvoSineB = sinf(evoPhase * 0.41f + 1.13f);
+            }
+        }
+
+        // Cache shapedDecayNorm — used by processReverb and freeze gain.
+        // sDecay moves via fonepole at 0.005 coeff so sub-rate is fine.
+        if(subRateCount == 0)
+            cachedDecayNorm = shapedDecayNorm(sDecay);
+
+        // Raw dry is the unfiltered signal for bypass — no tone suck.
+        // HPF'd dry feeds the effect engines only (removes DC/rumble
+        // from reverb tank and chorus delay lines, not from your tone).
+        float rawDry = raw;
         float dry = inputHpf.Process(raw);
 
         float playSense  = freezePlaySenseHp.Process(dry);
@@ -867,39 +952,38 @@ static void AudioCallback(AudioHandle::InputBuffer  in,
         if(lfoPhaseB >= 1.f) lfoPhaseB -= 1.f;
         if(lfoPhaseC >= 1.f) lfoPhaseC -= 1.f;
 
+        // driftVal sinf computed in sub-rate block above
         driftPhase += DRIFT_FREQ / SR_F;
         if(driftPhase >= 1.f)
             driftPhase -= 1.f;
-        driftVal = sinf(driftPhase * TWO_PI_F);
 
         // ====================================================
         // FREEZE EVOLUTION STATE UPDATE
+        // Only run age/phase accumulators when freeze is active.
+        // Jitter counters always run (cheap) to stay seeded.
         // ====================================================
         if(reverbFz)
         {
             freezeAgeSec += 1.0f / SR_F;
             if(freezeAgeSec > 60.f) freezeAgeSec = 60.f;
+
+            freezeEvoPhase += 0.011f / SR_F;
+            if(freezeEvoPhase >= 1.f) freezeEvoPhase -= 1.f;
+
+            freezeTextureDrift += 0.0031f / SR_F;
+            if(freezeTextureDrift >= 1.f) freezeTextureDrift -= 1.f;
         }
         else
         {
             freezeAgeSec = 0.f;
         }
-        freezeLedAge = clampf((freezeAgeSec - 0.5f) / 18.0f, 0.f, 1.f);
 
-        freezeEvoPhase += 0.011f / SR_F;
-        if(freezeEvoPhase >= 1.f) freezeEvoPhase -= 1.f;
-
-        freezeTextureDrift += 0.0031f / SR_F;
-        if(freezeTextureDrift >= 1.f) freezeTextureDrift -= 1.f;
-
-        const int   resetCounts[3]  = {28657, 40111, 56369};
-        const float jitterDepth[3]  = {4.50f, 6.00f, 8.00f};
         for(int v = 0; v < 3; v++)
         {
             if(--fzJitCnt[v] <= 0)
             {
-                fzJitCnt[v] = resetCounts[v];
-                fzJitTgt[v] = rand_bipolar(fzJitState[v]) * jitterDepth[v];
+                fzJitCnt[v] = FZ_JIT_RESET[v];
+                fzJitTgt[v] = rand_bipolar(fzJitState[v]) * FZ_JIT_DEPTH[v];
             }
             fzJitCur[v] += 0.0008f * (fzJitTgt[v] - fzJitCur[v]);
         }
@@ -1034,8 +1118,17 @@ static void AudioCallback(AudioHandle::InputBuffer  in,
         wetR = apR[1].Process(wetR);
         wetR = apR[2].Process(wetR);
 
-        wetL = toneSvfL.Process(wetL);
-        wetR = toneSvfR.Process(wetR);
+        wetL = toneSvfL.Process(wetL, sTone);
+        wetR = toneSvfR.Process(wetR, sTone);
+
+        // Low-end recovery: the wet engines strip bass via inputHpf (80Hz),
+        // chWriteHpf (110Hz), and rvHpfL/R (60Hz). Recover the lost
+        // sub-content from the unfiltered rawDry and blend it back in
+        // proportional to how much wet signal is present.
+        float bassContent = wetBassRecover.Process(rawDry);
+        float bassAmt = anyOn * 0.38f;
+        wetL += bassContent * bassAmt;
+        wetR += bassContent * bassAmt;
 
         // Hi-Fi: mono sum raised 0.7 -> 0.82 for more body
         float wetMono = (wetL + wetR) * 0.82f;
@@ -1053,17 +1146,13 @@ static void AudioCallback(AudioHandle::InputBuffer  in,
 
         float sendAmt   = 0.54f * sFs1Send;
         float freezeSrc = reverbFreezeMid * (1.f - sendAmt)
-                        + chorusSend * sendAmt;
+        + chorusSend * sendAmt;
         freezeSrc = clampf(freezeSrc, -1.f, 1.f);
         fzCapBuf.Write(freezeSrc);
 
-        const int capDelay[3] = {0, 113, 347};
-        const int capDur[3]   = {89, 157, 271};
-        const int capSeqEnd   = capDelay[2] + capDur[2] + 64;
-
         if(fzCaptureSeqActive)
         {
-            if(fzCaptureSeqSamp < capSeqEnd)
+            if(fzCaptureSeqSamp < FZ_CAP_SEQ_END)
                 fzCaptureSeqSamp++;
             else
                 fzCaptureSeqActive = false;
@@ -1072,7 +1161,7 @@ static void AudioCallback(AudioHandle::InputBuffer  in,
         float voiceHold[3];
         float voiceFeed[3];
         float freezeHoldMaster = freezeShutdownTailActive
-                               ? freezeShutdownHold : sRvFz;
+        ? freezeShutdownHold : sRvFz;
 
         freezePlayActivity = livePlaySense * sRvFz;
 
@@ -1085,8 +1174,8 @@ static void AudioCallback(AudioHandle::InputBuffer  in,
             float hold = freezeHoldMaster;
             if(fzCaptureSeqActive)
             {
-                float x    = (float)(fzCaptureSeqSamp - capDelay[v])
-                           / (float)capDur[v];
+                float x    = (float)(fzCaptureSeqSamp - FZ_CAP_DELAY[v])
+                / (float)FZ_CAP_DUR[v];
                 float seal = smoothstep01(x);
                 hold *= seal;
             }
@@ -1106,11 +1195,11 @@ static void AudioCallback(AudioHandle::InputBuffer  in,
         float baseMod = driftVal * 1.40f * SR_OVER_1000;
 
         float snapA = fzCapBuf.Read(1.f) * 0.66f  + fzCapBuf.Read(3.f) * 0.20f
-                    + fzCapBuf.Read(7.f) * 0.09f  + fzCapBuf.Read(13.f) * 0.05f;
+        + fzCapBuf.Read(7.f) * 0.09f  + fzCapBuf.Read(13.f) * 0.05f;
         float snapB = fzCapBuf.Read(2.f) * 0.63f  + fzCapBuf.Read(5.f) * 0.21f
-                    + fzCapBuf.Read(11.f) * 0.10f + fzCapBuf.Read(17.f) * 0.06f;
+        + fzCapBuf.Read(11.f) * 0.10f + fzCapBuf.Read(17.f) * 0.06f;
         float snapC = fzCapBuf.Read(3.f) * 0.60f  + fzCapBuf.Read(7.f) * 0.22f
-                    + fzCapBuf.Read(13.f) * 0.11f + fzCapBuf.Read(19.f) * 0.07f;
+        + fzCapBuf.Read(13.f) * 0.11f + fzCapBuf.Read(19.f) * 0.07f;
 
         float srcA = snapA * 0.94f + freezeSrc * 0.06f;
         float srcB = snapB * 0.95f + freezeSrc * 0.05f;
@@ -1137,33 +1226,29 @@ static void AudioCallback(AudioHandle::InputBuffer  in,
         float fzCd = fzC * 0.86f + fzPostVoiceC.Process(fzC) * 0.14f;
 
         // ====================================================
-        // FREEZE EVOLUTION V2 (unchanged)
+        // FREEZE EVOLUTION V2
+        // sinf values cached in sub-rate block above
         // ====================================================
         float freezeBondAud = smoothstep01(sBal);
         float evoAgeNorm = clampf((freezeAgeSec - 0.4f) / 10.5f, 0.f, 1.f);
         float evoAmt     = smoothstep01(evoAgeNorm);
         evoAmt *= (0.30f + 0.70f * freezeBondAud);
 
-        float driftA = sinf(freezeTextureDrift * TWO_PI_F);
-        float driftB = sinf(freezeTextureDrift * TWO_PI_F * 0.37f + 0.9f);
-        float driftC = sinf(freezeTextureDrift * TWO_PI_F * 0.19f + 2.1f);
-
         float driftAmt = 0.06f * evoAmt;
-        float wA = 0.38f + driftA * driftAmt;
-        float wB = 0.34f + driftB * driftAmt;
-        float wC = 0.28f + driftC * driftAmt;
+        float wA = 0.38f + cachedDriftA * driftAmt;
+        float wB = 0.34f + cachedDriftB * driftAmt;
+        float wC = 0.28f + cachedDriftC * driftAmt;
         float wSum = wA + wB + wC;
         wA /= wSum;  wB /= wSum;  wC /= wSum;
 
         float fzOutBase = fzAd * wA + fzBd * wB + fzCd * wC;
 
-        float evoSineA = sinf(freezeEvoPhase * TWO_PI_F);
-        float evoSineB = sinf(freezeEvoPhase * TWO_PI_F * 0.41f + 1.13f);
-
         float fzCloudOpenFreq = 1250.f + 1650.f * freezeBondAud;
-        float evoFreqDrift    = evoAmt * (110.f * evoSineA + 45.f * evoSineB);
+        float evoFreqDrift    = evoAmt * (110.f * cachedEvoSineA + 45.f * cachedEvoSineB);
         float reactiveOpen    = freezePlayActivity * (70.f + 110.f * freezeBondAud);
-        fzCloudTone.SetFreq(fzCloudOpenFreq + evoFreqDrift + reactiveOpen, SR_F);
+        // SetFreq calls expf — only update at sub-rate
+        if(subRateCount == 0)
+            fzCloudTone.SetFreq(fzCloudOpenFreq + evoFreqDrift + reactiveOpen, SR_F);
 
         float fzLowKeep = fzLowKeepTone.Process(fzOutBase);
         float fzCloudA  = fzCloudTone.Process(fzOutBase);
@@ -1176,7 +1261,7 @@ static void AudioCallback(AudioHandle::InputBuffer  in,
         fzDiffBlend  = clampf(fzDiffBlend, 0.f, 0.68f);
 
         float fzCloudMix = fzOutBase * (1.f - fzDiffBlend)
-                         + fzCloudC * fzDiffBlend;
+        + fzCloudC * fzDiffBlend;
 
         float lowKeepAmt = 0.035f + 0.055f * evoAmt;
         lowKeepAmt *= 0.90f + 0.10f * freezeBondAud;
@@ -1188,10 +1273,9 @@ static void AudioCallback(AudioHandle::InputBuffer  in,
         postSumBlend  = clampf(postSumBlend, 0.f, 0.38f);
 
         float fzOut = fzCloudMix * (1.f - postSumBlend)
-                    + fzDiff * postSumBlend;
+        + fzDiff * postSumBlend;
 
-        float decayNorm  = shapedDecayNorm(sDecay);
-        float freezeGain = 14.45f + 1.76f * decayNorm;
+        float freezeGain = 14.45f + 1.76f * cachedDecayNorm;
 
         float freezeBondLift = 1.00f + 0.45f * freezeBondAud * freezeHoldMaster;
         float fs1SendLift    = 1.00f + 0.08f * sFs1Send * sChOn * sRvFz;
@@ -1206,15 +1290,18 @@ static void AudioCallback(AudioHandle::InputBuffer  in,
         // MIX OUTPUT
         // ====================================================
         float mixNorm    = clampf(sMix, 0.f, 1.f);
-        float wetCtrl    = smoothstep01(powf(mixNorm, 1.32f));
+        // Cheap approx of powf(x, 1.32) for x in [0,1]:
+        // x * (1 - 0.32*(1-x)) = x * (0.68 + 0.32*x)
+        float mixShaped  = mixNorm * (0.68f + 0.32f * mixNorm);
+        float wetCtrl    = smoothstep01(mixShaped);
         float dryPreserve = 0.89f + 0.11f * (1.f - wetCtrl);
         float wetMakeup   = 0.90f + 0.44f * wetCtrl;
 
         float reverbOnly = sRvOn * (1.f - sChOn);
         wetMakeup += reverbOnly * 0.13f;
 
-        float processed = dry * dryPreserve + wetMono * wetCtrl * wetMakeup;
-        float output    = dry * (1.f - anyOn) + processed * anyOn + fzOut;
+        float processed = rawDry * dryPreserve + wetMono * wetCtrl * wetMakeup;
+        float output    = rawDry * (1.f - anyOn) + processed * anyOn + fzOut;
         output = clampf(output, -1.f, 1.f);
 
         out[0][i] = output;
@@ -1253,8 +1340,9 @@ static void UpdateControls()
 
     fonepole(sSw4Ctrl, tSw4, 0.02f);
 
-    toneSvfL.SetFreq(tTone, 1.4f, SR_F);
-    toneSvfR.SetFreq(tTone, 1.4f, SR_F);
+    // TiltEQ pivot frequency is fixed — only the tilt amount
+    // (from K6) changes, applied at process time.
+    // No per-frame SetFreq needed since pivot doesn't change.
 
     float decayNormCtrl = shapedDecayNorm(tDecay);
     float hallCtrl      = sSw4Ctrl * (0.18f + 0.82f * decayNormCtrl);
@@ -1268,10 +1356,10 @@ static void UpdateControls()
     inDiff[3].g = diffBase - 0.05f;
 
     float dampOff  = PLATE_DAMP_OFFSET
-                   + hallCtrl * (HALL_DAMP_OFFSET - PLATE_DAMP_OFFSET);
+    + hallCtrl * (HALL_DAMP_OFFSET - PLATE_DAMP_OFFSET);
     float dampXmod = driftVal * XMOD_DAMP_RANGE;
     float dampFreq = std::max(300.f,
-        std::min((5000.f + dampOff + dampXmod) - sSw4 * 450.f, 14000.f));
+                              std::min((5000.f + dampOff + dampXmod) - sSw4 * 450.f, 14000.f));
     for(int t = 0; t < 4; t++)
         rvDamp[t].SetFreq(dampFreq, SR_F);
 
@@ -1465,10 +1553,14 @@ int main()
 
     fzCapBuf.Init(fzCapBufMem, FZ_CAP_BUF_SIZE);
 
-    rvHpf.Init(60.f, sr);
+    rvHpfL.Init(60.f, sr);
+    rvHpfR.Init(60.f, sr);
     inputHpf.Init(80.f, sr);
-    chWriteHpf.Init(110.f, sr);
-    chWriteLpf.Init(4800.f, sr);
+    chWriteHpf.Init(80.f, sr);
+    // 12kHz anti-alias is gentle enough to preserve pick attack
+    // and string shimmer while still preventing foldover artifacts
+    // from the short modulated delay lines.
+    chWriteLpf.Init(12000.f, sr);
 
     inDiff[0].Init(inDiffMemA, INDIFF_A, 0.56f);
     inDiff[1].Init(inDiffMemB, INDIFF_B, 0.54f);
@@ -1488,19 +1580,22 @@ int main()
     revLateSmearL.Init(3200.f, sr);
     revLateSmearR.Init(3200.f, sr);
 
+    // Recovers bass below 120 Hz from rawDry to blend into wet bus
+    wetBassRecover.Init(120.f, sr);
+
     freezePlaySenseHp.Init(170.f, sr);
     freezePlayEnvFast.Init(18.f, sr);
     freezePlayEnvSlow.Init(2.2f, sr);
 
-    apL[0].Init(apMemL1, AP_L1, 0.6f);
-    apL[1].Init(apMemL2, AP_L2, 0.6f);
-    apL[2].Init(apMemL3, AP_L3, 0.6f);
-    apR[0].Init(apMemR1, AP_R1, 0.6f);
-    apR[1].Init(apMemR2, AP_R2, 0.6f);
-    apR[2].Init(apMemR3, AP_R3, 0.6f);
+    apL[0].Init(apMemL1, AP_L1, 0.45f);
+    apL[1].Init(apMemL2, AP_L2, 0.45f);
+    apL[2].Init(apMemL3, AP_L3, 0.45f);
+    apR[0].Init(apMemR1, AP_R1, 0.45f);
+    apR[1].Init(apMemR2, AP_R2, 0.45f);
+    apR[2].Init(apMemR3, AP_R3, 0.45f);
 
-    toneSvfL.Init(1800.f, 1.4f, sr);
-    toneSvfR.Init(1800.f, 1.4f, sr);
+    toneSvfL.Init(800.f, sr);
+    toneSvfR.Init(800.f, sr);
 
     fzFuseA.Init(fzFuseMemA, FZ_FUSE_A, 0.58f);
     fzFuseB.Init(fzFuseMemB, FZ_FUSE_B, 0.52f);
@@ -1528,10 +1623,10 @@ int main()
 
     pRate.Init( petal.knob[Terrarium::KNOB_1], 0.1f, 3.f,    Parameter::LINEAR);
     pMix.Init(  petal.knob[Terrarium::KNOB_2], 0.f,  1.f,    Parameter::LINEAR);
-    pDecay.Init(petal.knob[Terrarium::KNOB_3], 0.3f, 0.88f,  Parameter::LINEAR);
+    pDecay.Init(petal.knob[Terrarium::KNOB_3], 0.3f, 0.93f,  Parameter::LINEAR);
     pDepth.Init(petal.knob[Terrarium::KNOB_4], 0.2f, 5.f,    Parameter::LINEAR);
     pBal.Init(  petal.knob[Terrarium::KNOB_5], 0.f,  1.f,    Parameter::LINEAR);
-    pTone.Init( petal.knob[Terrarium::KNOB_6], 300.f, 5000.f, Parameter::LOGARITHMIC);
+    pTone.Init( petal.knob[Terrarium::KNOB_6], 0.f,   1.f,    Parameter::LINEAR);
 
     led1.Init(petal.seed.GetPin(Terrarium::LED_1), false);
     led2.Init(petal.seed.GetPin(Terrarium::LED_2), false);
@@ -1558,7 +1653,6 @@ int main()
     freezeEvoPhase           = 0.f;
     freezeTextureDrift       = 0.f;
     freezePlayActivity       = 0.f;
-    freezeLedAge             = 0.f;
 
     fzJitCnt[0] = 28657;
     fzJitCnt[1] = 40111;
